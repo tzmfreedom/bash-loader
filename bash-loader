@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# bash-loader query "SELECT * FROM Account"
+
+build_header() {
+  echo -n "{\"alg\":\"$1\"}"
+}
+
+b64enc() { openssl enc -base64 -A | tr '+/' '-_' | tr -d '='; }
+json() { jq -c . | LC_CTYPE=C tr -d '\n'; }
+hs_sign() { openssl dgst -binary -sha"${1}" -hmac "$2"; }
+rs_sign() { openssl dgst -binary -sha"${1}" -sign <(printf '%s\n' "$2"); }
+
+sign() {
+  local algo payload header sig secret
+  secret=$(cat "$3")
+  algo=${1:-RS256}; algo=${algo^^}
+  header=$(build_header "$algo") || return
+  payload=${2:-$test_payload}
+  signed_content="$(json <<<"$header" | b64enc).$(json <<<"$payload" | b64enc)"
+  case $algo in
+          HS*) sig=$(printf %s "$signed_content" | hs_sign "${algo#HS}" "$secret" | b64enc) ;;
+          RS*) sig=$(printf %s "$signed_content" | rs_sign "${algo#RS}" "$secret" | b64enc) ;;
+          *) echo "Unknown algorithm" >&2; return 1 ;;
+  esac
+  printf '%s.%s\n' "${signed_content}" "${sig}"
+}
+
+query() {
+  local access_token=$1 query=$2
+  version=${SFDC_VERSION:-v42.0}
+  records=$(curl -sS "${SFDC_ENDPOINT}/services/data/${version}/query?q=$query" -H "Authorization: Bearer ${access_token}" -H "X-PrettyPrint:1")
+  output "$records"
+
+  next=$(echo "$records" | jq -r .nextRecordsUrl)
+  while [ "$next" != "null" ]; do
+    records=$(curl -sS "${SFDC_ENDPOINT}/${next}" -H "Authorization: Bearer ${access_token}" -H "X-PrettyPrint:1")
+    output "$records"
+    next=$(echo "$records" | jq -r .nextRecordsUrl)
+  done
+}
+
+output() {
+  echo "$1"
+}
+
+claim="{\"iss\":\"$SFDC_CLIENT_ID\",\"aud\":\"$SFDC_AUDIENCE\",\"sub\":\"$SFDC_USERNAME\",\"exp\":\"$(($(date "+%s") + 180))\"}"
+jwt=$(sign RS256 "$claim" "$SFDC_PRIVATE_KEY")
+token_response=$(curl -sS -X POST "${SFDC_ENDPOINT}/services/oauth2/token" -d "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer" -d "assertion=${jwt}" -H "X-PrettyPrint:1")
+access_token=$(echo -n "$token_response" | jq -r '.access_token')
+
+if [[ $access_token == 'null' ]]; then
+  echo "error: $token_response"
+  exit
+fi
+
+case "$1" in
+  "query")
+    query "$access_token" "$2";;
+  *)
+    echo "error";;
+esac
