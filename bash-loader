@@ -39,9 +39,30 @@ query() {
   done
 }
 
-output() {
-  echo "$1"
+validate() {
+  if [[ "$SFDC_CLIENT_ID" == "" ]]; then
+    echo "error: SFDC_CLIENT_ID is required"
+    exit
+  fi
+
+  if [[ "$SFDC_PRIVATE_KEY" == "" ]]; then
+    echo "error: private key is required"
+    exit
+  fi
+
+  if [[ "$SFDC_USERNAME" == "" ]]; then
+    echo "error: username is required"
+    exit
+  fi
 }
+
+output() {
+  echo "$1" | jq -c '.records[]'
+}
+
+SFDC_AUDIENCE=${SFDC_AUDIENCE:-https://login.salesforce.com}
+
+validate
 
 claim="{\"iss\":\"$SFDC_CLIENT_ID\",\"aud\":\"$SFDC_AUDIENCE\",\"sub\":\"$SFDC_USERNAME\",\"exp\":\"$(($(date "+%s") + 180))\"}"
 jwt=$(sign RS256 "$claim" "$SFDC_PRIVATE_KEY")
@@ -55,7 +76,7 @@ fi
 
 case "$1" in
   "query")
-    query "$access_token" "$2";;
+    query "$access_token" $(echo -n "$2" | sed 's/ /+/g');;
   *)
     echo "error";;
 esac
