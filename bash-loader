@@ -25,6 +25,20 @@ sign() {
   printf '%s.%s\n' "${signed_content}" "${sig}"
 }
 
+get_access_token() {
+  claim="{\"iss\":\"$SFDC_CLIENT_ID\",\"aud\":\"$SFDC_AUDIENCE\",\"sub\":\"$SFDC_USERNAME\",\"exp\":\"$(($(date "+%s") + 180))\"}"
+  jwt=$(sign RS256 "$claim" "$SFDC_PRIVATE_KEY")
+  token_response=$(curl -sS -X POST "${SFDC_ENDPOINT}/services/oauth2/token" -d "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer" -d "assertion=${jwt}" -H "X-PrettyPrint:1")
+  access_token=$(echo -n "$token_response" | jq -r '.access_token')
+
+  if [[ $access_token == 'null' ]]; then
+    echo "error: $token_response"
+    exit
+  fi
+
+  echo -n "$access_token"
+}
+
 query() {
   local access_token=$1 query=$2
   version=${SFDC_VERSION:-v42.0}
@@ -64,15 +78,7 @@ SFDC_AUDIENCE=${SFDC_AUDIENCE:-https://login.salesforce.com}
 
 validate
 
-claim="{\"iss\":\"$SFDC_CLIENT_ID\",\"aud\":\"$SFDC_AUDIENCE\",\"sub\":\"$SFDC_USERNAME\",\"exp\":\"$(($(date "+%s") + 180))\"}"
-jwt=$(sign RS256 "$claim" "$SFDC_PRIVATE_KEY")
-token_response=$(curl -sS -X POST "${SFDC_ENDPOINT}/services/oauth2/token" -d "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer" -d "assertion=${jwt}" -H "X-PrettyPrint:1")
-access_token=$(echo -n "$token_response" | jq -r '.access_token')
-
-if [[ $access_token == 'null' ]]; then
-  echo "error: $token_response"
-  exit
-fi
+access_token=$(get_access_token)
 
 case "$1" in
   "query")
