@@ -1,6 +1,26 @@
 #!/usr/bin/env bash
 # bash-loader query "SELECT * FROM Account"
 
+PROGNAME=$(basename $0)
+VERSION="1.0"
+
+usage() {
+    echo "Usage: $PROGNAME [OPTIONS] FILE"
+    echo "  Salesforce Data Exporter."
+    echo "  This script use following environment variables"
+    echo "  - SFDC_USERNAME"
+    echo "  - SFDC_AUDIENCE"
+    echo "  - SFDC_PRIVATE_KEY"
+    echo "  - SFDC_CLIENT_ID"
+    echo "  - SFDC_ENDPOINT"
+    echo
+    echo "Options:"
+    echo "  -h, --help"
+    echo "      --version"
+    echo
+    exit 1
+}
+
 build_header() {
   echo -n "{\"alg\":\"$1\"}"
 }
@@ -26,63 +46,95 @@ sign() {
 }
 
 get_access_token() {
-  claim="{\"iss\":\"$SFDC_CLIENT_ID\",\"aud\":\"$SFDC_AUDIENCE\",\"sub\":\"$SFDC_USERNAME\",\"exp\":\"$(($(date "+%s") + 180))\"}"
-  jwt=$(sign RS256 "$claim" "$SFDC_PRIVATE_KEY")
-  token_response=$(curl -sS -X POST "${SFDC_ENDPOINT}/services/oauth2/token" -d "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer" -d "assertion=${jwt}" -H "X-PrettyPrint:1")
-  access_token=$(echo -n "$token_response" | jq -r '.access_token')
+  local client_id audience username private_key endpoint
+  endpoint=$1
+  client_id=$2
+  private_key=$3
+  audience=$4
+  username=$5
+  claim="{\"iss\":\"$client_id\",\"aud\":\"$audience\",\"sub\":\"$username\",\"exp\":\"$(($(date "+%s") + 180))\"}"
+  jwt=$(sign RS256 "$claim" "$private_key")
+  curl -sS -X POST "${endpoint}/services/oauth2/token" -d "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer" -d "assertion=${jwt}" -H "X-PrettyPrint:1"
+}
 
-  if [[ $access_token == 'null' ]]; then
-    echo "error: $token_response"
-    exit
+get_request() {
+  local access_token=$1 url=$2 response body status
+  response=$(curl -sS -w "HTTPSTATUS:%{http_code}" $url -H "Authorization: Bearer ${access_token}" -H "X-PrettyPrint:1")
+  body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
+  status=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
+
+  if [[ $status -ne 200 ]]; then
+    echo "Error [HTTP status: $status] [HTTP body: $body]" 1>&2
+    exit 1
   fi
-
-  echo -n "$access_token"
+  echo "$body"
 }
 
 query() {
-  local access_token=$1 query=$2
-  version=${SFDC_VERSION:-v42.0}
-  records=$(curl -sS "${SFDC_ENDPOINT}/services/data/${version}/query?q=$query" -H "Authorization: Bearer ${access_token}" -H "X-PrettyPrint:1")
-  output "$records"
+  local access_token=$1 instance_url=$2 body status
+  query=${3:-$(cat)}
 
-  next=$(echo "$records" | jq -r .nextRecordsUrl)
+  body=$(get_request "$access_token" "${instance_url}/services/data/${SFDC_VERSION}/query?q=$query")
+  if [[ $? -ne 0 ]]; then
+    exit 1
+  fi
+  echo "$body" | output
+  next=$(echo "$body" | jq -r .nextRecordsUrl)
   while [ "$next" != "null" ]; do
-    records=$(curl -sS "${SFDC_ENDPOINT}/${next}" -H "Authorization: Bearer ${access_token}" -H "X-PrettyPrint:1")
-    output "$records"
-    next=$(echo "$records" | jq -r .nextRecordsUrl)
+    body=$(get_request "$access_token" "${instance_url}/${next}")
+    if [[ $? -ne 0 ]]; then
+      exit 1
+    fi
+    echo "$body" | output
+    next=$(echo "$body" | jq -r .nextRecordsUrl)
   done
 }
 
 validate() {
   if [[ "$SFDC_CLIENT_ID" == "" ]]; then
-    echo "error: SFDC_CLIENT_ID is required"
-    exit
+    echo "error: SFDC_CLIENT_ID is required" 1>&2
+    exit 1
   fi
 
   if [[ "$SFDC_PRIVATE_KEY" == "" ]]; then
-    echo "error: private key is required"
-    exit
+    echo "error: private key is required" 1>&2
+    exit 1
   fi
 
   if [[ "$SFDC_USERNAME" == "" ]]; then
-    echo "error: username is required"
-    exit
+    echo "error: username is required" 1>&2
+    exit 1
   fi
 }
 
 output() {
-  echo "$1" | jq -c '.records[]'
+  query_response=$(cat)
+  records=$(echo "$query_response" | jq -c '.records[]')
+  echo -n "$records"
 }
 
+if [[ "$1" == '-h' ]]; then
+  usage
+fi
+
 SFDC_AUDIENCE=${SFDC_AUDIENCE:-https://login.salesforce.com}
+SFDC_VERSION=${SFDC_VERSION:-v42.0}
 
 validate
 
-access_token=$(get_access_token)
+token_response=$(get_access_token "$SFDC_ENDPOINT" "$SFDC_CLIENT_ID" "$SFDC_PRIVATE_KEY" "$SFDC_AUDIENCE" "$SFDC_USERNAME")
+
+access_token=$(echo -n "$token_response" | jq -r '.access_token')
+instance_url=$(echo -n "$token_response" | jq -r '.instance_url')
+
+if [[ $access_token == 'null' ]]; then
+  echo "error: failed to get access_token, response => $token_response"
+  exit 1
+fi
 
 case "$1" in
-  "query")
-    query "$access_token" $(echo -n "$2" | sed 's/ /+/g');;
+  "q" | "query")
+     echo -n "$2" | sed 's/ /+/g' | query "$access_token" "$instance_url";;
   *)
-    echo "error";;
+    echo "undefined error";;
 esac
