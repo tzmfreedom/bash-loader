@@ -25,6 +25,7 @@ build_header() {
   echo -n "{\"alg\":\"$1\"}"
 }
 
+urlencode() { nkf -WwMQ | sed 's/=$//g' | tr '=' '%' | tr -d '\n'; }
 b64enc() { openssl enc -base64 -A | tr '+/' '-_' | tr -d '='; }
 json() { jq -c . | LC_CTYPE=C tr -d '\n'; }
 hs_sign() { openssl dgst -binary -sha"${1}" -hmac "$2"; }
@@ -134,7 +135,7 @@ fi
 
 case "$1" in
   "q" | "query")
-     echo -n "$2" | sed 's/ /+/g' | query "$access_token" "$instance_url";;
+     echo -n "$2" | urlencode | query "$access_token" "$instance_url";;
   *)
     echo "undefined error";;
 esac
